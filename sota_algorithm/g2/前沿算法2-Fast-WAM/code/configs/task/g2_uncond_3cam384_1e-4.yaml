@@ -1,0 +1,30 @@
+# @package _global_
+
+defaults:
+  - override /data: g2_3cam
+  - override /model: fastwam
+  - _self_
+
+# dataloading
+batch_size: 8
+num_workers: 4
+
+model:
+  mot_checkpoint_mixed_attn: false
+  loss:
+    lambda_video: 1.0
+
+# scheduler
+lr_scheduler_type: "cosine"
+learning_rate: 1e-4
+# max_steps takes precedence; num_epochs is only the dataloader upper bound.
+num_epochs: 5
+max_steps: 7500
+log_every: 10
+save_every: 2500
+eval_every: 500
+
+# training
+gradient_accumulation_steps: 2
+weight_decay: 1e-2
+resume: null

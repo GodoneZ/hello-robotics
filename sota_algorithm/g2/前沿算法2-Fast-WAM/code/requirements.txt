@@ -1,0 +1,6 @@
+# FastWAM runtime/training dependencies are pinned in FastWAM/pyproject.toml
+# (installed by setup_env.sh via `pip install -e FastWAM`).  This file only
+# covers the extra packages used by this chapter's own tooling.
+# LeRobot v2.1 dataset writer, pinned to the same commit as openpi:
+git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5
+pytest>=7.4.0
