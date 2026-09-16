@@ -107,6 +107,15 @@ Fast-WAM 沿用官方 RoboTwin 三相机拼接方式：头部图像放在上方�
 
 本章已验证的环境为 Linux、NVIDIA GPU 和 Isaac Sim 5.1.0；模型端使用 Python 3.10、PyTorch 2.7.1 和 CUDA 12.8。Joint 模式如需保存预测视频，系统还需要 `ffmpeg`。
 
+数据采集与闭环评测使用 IsaacLab 自带的 Python。首次打开终端时，先将 `ISAACLAB_ROOT` 指向本机 IsaacLab 仓库根目录，并确认解释器存在：
+
+```bash
+export ISAACLAB_ROOT="$HOME/IsaacLab"  # 按实际安装位置修改
+test -x "$ISAACLAB_ROOT/_isaac_sim/python.sh"
+```
+
+后文的 `${ISAACLAB_ROOT}/_isaac_sim/python.sh` 均引用这个解释器；模型训练与推理服务仍使用独立的 `fastwam` Conda 环境。
+
 G2 USD 不随 GitHub 代码仓库分发。先在 `hello-robotics` 根目录下载本章所需的最小资产集：
 
 ```bash
