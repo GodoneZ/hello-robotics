@@ -25,7 +25,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Parameter-name fragments that stay fully trainable even with LoRA enabled.
-FULL_TRAIN_FRAGMENTS = ("action_encoder.", "head.", "proprio_encoder.")
+# Keep these paths specific to the action expert: a generic ``head.`` match also
+# selects the pretrained video head because FastWAM exposes both experts at the
+# model root.
+FULL_TRAIN_FRAGMENTS = (
+    "action_expert.action_encoder.",
+    "action_expert.head.",
+    "proprio_encoder.",
+)
 # Cheap per-block parameters that are worth updating (ch16 recipe).
 SMALL_TRAIN_SUFFIXES = (".modulation",)
 
@@ -121,6 +128,24 @@ def _is_target_linear(name: str) -> bool:
     )
 
 
+def restore_lora_trainability(model: nn.Module) -> None:
+    """Restore the exact LoRA trainable set after trainer mode changes.
+
+    The upstream trainer toggles all DiT parameters when entering training mode
+    and after validation. Reapplying this mask prevents frozen base parameters
+    from accumulating gradients outside the optimizer.
+    """
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for name, parameter in model.named_parameters():
+        if name.endswith((".lora_A", ".lora_B")):
+            parameter.requires_grad_(True)
+        elif any(fragment in name for fragment in FULL_TRAIN_FRAGMENTS):
+            parameter.requires_grad_(True)
+        elif name.endswith(SMALL_TRAIN_SUFFIXES):
+            parameter.requires_grad_(True)
+
+
 def apply_lora(
     model: nn.Module,
     rank: int = 16,
@@ -142,11 +167,8 @@ def apply_lora(
                 )
                 wrapped.append(name)
 
-    for name, parameter in model.named_parameters():
-        if any(fragment in name for fragment in FULL_TRAIN_FRAGMENTS):
-            parameter.requires_grad_(True)
-        elif name.endswith(SMALL_TRAIN_SUFFIXES):
-            parameter.requires_grad_(True)
+    model._fastwam_lora_enabled = True
+    restore_lora_trainability(model)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())

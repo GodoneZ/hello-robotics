@@ -110,6 +110,8 @@ def main() -> None:
         parser.error("--position-noise must be non-negative")
     if args.action_seconds <= 0 or args.inference_timeout <= 0:
         parser.error("--action-seconds and --inference-timeout must be positive")
+    if args.execution_mode == "official" and args.enable_grasp_guard:
+        parser.error("--enable-grasp-guard is only available with --execution-mode receding")
 
     execute_steps = args.execute_steps
     if execute_steps is None:

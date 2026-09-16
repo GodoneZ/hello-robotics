@@ -1,16 +1,178 @@
-# 前沿算法2：Fast-WAM 复现与部署
+# 前沿算法2：Fast-WAM 世界动作模型复现与部署
 
-本章在 G2 Omnipicker 上复现 Fast-WAM，完成三相机数据采集、LeRobot 数据转换、8 卡全量微调、单卡推理服务和 Isaac Sim 闭环评测。模型为什么能在推理时删除未来视频生成，请先阅读同目录的[《Fast-WAM 模型原理》](./Fast-WAM%20模型原理.md)。
+本章介绍 Fast-WAM 的核心原理，并在 G2 Omnipicker 上完成三相机数据采集、LeRobot 数据转换、模型训练、推理服务和 Isaac Sim 闭环评测。阅读顺序与实践流程一致：先理解模型为什么能移除测试时未来想象，再完成 G2 数据、训练和部署。
 
 > 论文：*Fast-WAM: Do World Action Models Need Test-time Future Imagination?*
 >
+> 作者：Tianyuan Yuan, Zibin Dong, Yicheng Liu, Hang Zhao
+>
+> 单位：清华大学交叉信息研究院（IIIS）、Galaxea AI
+>
 > 官方资源：[arXiv](https://arxiv.org/abs/2603.16666)｜[项目主页](https://yuantianyuan01.github.io/FastWAM/)｜[代码](https://github.com/yuantianyuan01/FastWAM)｜[模型权重](https://huggingface.co/yuanty/fastwam)
 
-Fast-WAM 训练时联合优化视频预测和动作预测，推理时默认只编码当前观测并生成动作。本文还保留 `joint` 推理入口，用于观察同一个模型显式生成的未来三视角视频，但正式部署使用延迟更低的 `action` 模式。
+---
 
-## 第一部分 G2 任务与数据合同
+## 第一部分 算法原理
 
-### 1.1 任务定义
+### 1.1 为什么要引入未来视频预测
+
+标准视觉—语言—动作模型直接根据当前观测和语言预测一段动作：
+
+$$
+p(a_{1:H} \mid o, l)
+$$
+
+其中 $`o`$ 是当前观测，$`l`$ 是语言指令，$`a_{1:H}`$ 是长度为 $`H`$ 的动作块。这条路径推理直接，但动作监督不会显式要求视觉骨干理解接触、物体运动、遮挡和形变等动态变化。
+
+World Action Model（WAM）把未来视觉预测作为额外学习目标，希望模型从演示数据中提取时间和动力学结构。常见的“先想象、再执行”方法可以写成：
+
+$$
+p(a_{1:H} \mid o, l)
+= \int p(v_{1:T} \mid o, l)\,
+p(a_{1:H} \mid o, l, v_{1:T})\,\mathrm{d}v_{1:T}
+$$
+
+这类方法在推理时先生成或同步生成未来视频，再预测动作。未来视频扩散需要处理高维时空 token，并执行多轮去噪，因而会增加闭环控制延迟。
+
+这里需要区分两个问题：
+
+- **视频共同训练是否有用**：未来视频监督能否让视觉骨干学到更好的世界表征；
+- **测试时未来想象是否必要**：部署时是否必须显式生成未来视频，动作模型才能取得较好效果。
+
+Fast-WAM 的核心结论是：主要收益来自训练阶段的视频共同训练。模型可以在训练时学习未来视频和动作，推理时只保留当前观测形成的世界表征：
+
+$$
+p_{\theta}(a_{1:H} \mid o, l)
+= p_{\theta}(a_{1:H} \mid z(o, l))
+$$
+
+其中 $`z(o,l)`$ 是 Video DiT 根据当前观测和语言形成的潜在世界表征。它通过一次视频分支前向获得，不需要在线生成未来视频。
+
+### 1.2 三种 WAM 范式
+
+![三种 WAM 范式](assets/fig1_wam_paradigms.png)
+
+<p align="center"><em>图 1　联合式 WAM、因果式 WAM 与 Fast-WAM（图片来源：<a href="https://arxiv.org/abs/2603.16666">Fast-WAM 论文 Figure 1</a>）</em></p>
+
+三种范式使用相同类型的当前观测、未来视频和动作 token，但信息依赖关系不同：
+
+- **联合式 WAM（Joint WAM）**：未来视频和动作在同一个扩散过程中同步去噪，动作始终与视频生成绑定；
+- **因果式 WAM（Causal WAM）**：Video DiT 先生成未来视频，Action DiT 再根据未来视频恢复动作，两个阶段串行执行；
+- **Fast-WAM**：训练时仍预测未来视频，但 Attention Mask 禁止动作读取未来视频，推理时可以删除未来视频生成过程。
+
+| 范式 | 训练时动作读取未来视频 | 推理时生成未来视频 | 推理顺序 |
+|---|---:|---:|---|
+| Joint WAM | 是 | 是 | 视频与动作同步去噪 |
+| Causal WAM | 是 | 是 | 先视频、后动作 |
+| Fast-WAM | 否 | 否 | 编码当前帧、再生成动作 |
+
+Fast-WAM 并没有删除世界建模，而是把未来视频预测从部署时的必经步骤改成训练阶段的辅助监督。
+
+### 1.3 模型结构与信息流
+
+![Fast-WAM 模型结构](assets/fig2_model_architecture.png)
+
+<p align="center"><em>图 2　语言、视频和动作经过各自编码器后进入 Video DiT 与 Action DiT 组成的 Mixture-of-Transformer（图片来源：<a href="https://arxiv.org/abs/2603.16666">Fast-WAM 论文 Figure 2a</a>）</em></p>
+
+Fast-WAM 由约 5B 参数的 Wan2.2 Video DiT 和约 1B 参数的 Action DiT 组成，总规模约 6B：
+
+- **语言指令**由 T5 编码，通过 cross-attention 注入视频和动作分支；
+- **当前帧和未来帧**由 Wan2.2 视频 VAE 压缩为 latent token；
+- **动作块**由轻量 Action Encoder 投影为与 DiT 对齐的动作 token。
+
+视频 VAE 在空间上压缩 8×8、时间上压缩 4 倍，使 Video DiT 在潜空间而不是像素空间中建模。Fast-WAM 推理时只使用 VAE 编码器压缩当前帧，不需要把未来 latent 解码为可见视频。
+
+训练输入包含三组 token：
+
+1. 当前观测的干净 latent $`f_0`$，作为两个分支共享的条件；
+2. 加噪的未来视频 latent $`f_1,\ldots,f_h`$，用于学习视频去噪；
+3. 加噪的动作 token $`a_1,\ldots,a_h`$，用于学习动作去噪。
+
+![训练与推理注意力掩码](assets/fig2_attention_mask.png)
+
+<p align="center"><em>图 3　结构化 Attention Mask 控制当前帧、未来视频和动作之间的信息流（图片来源：<a href="https://arxiv.org/abs/2603.16666">Fast-WAM 论文 Figure 2b</a>）</em></p>
+
+结构化 Attention Mask 规定：
+
+- 当前帧 token 不读取未来视频或动作 token；
+- 未来视频 token 可以读取当前帧，并在视频分支内部双向注意；
+- 动作 token 可以读取当前帧，并在动作分支内部双向注意；
+- 动作 token 不能读取未来视频 token。
+
+最后一条约束避免了未来信息泄漏。动作分支从训练开始就只依赖部署阶段真实可用的信息，因此推理时可以完整移除未来视频 token。
+
+### 1.4 视频共同训练与训练目标
+
+对动作或未来视频 latent，统一记监督目标为 $`y`$。采样高斯噪声 $`\epsilon \sim \mathcal{N}(0,I)`$ 和时间 $`t\in(0,1)`$：
+
+$$
+y_t = (1-t)y+t\epsilon
+$$
+
+模型学习从数据到噪声的 flow matching 速度场：
+
+$$
+\mathcal{L}_{\mathrm{FM}}(y)
+= \mathbb{E}_{y,\epsilon,t}
+\left[\left\lVert
+f_{\theta}(y_t,t,o,l)-(\epsilon-y)
+\right\rVert_2^2\right]
+$$
+
+动作和视频分别对应：
+
+$$
+\mathcal{L}_{\mathrm{act}}=\mathcal{L}_{\mathrm{FM}}(a_{1:H}),
+\qquad
+\mathcal{L}_{\mathrm{vid}}=\mathcal{L}_{\mathrm{FM}}(z_{1:T})
+$$
+
+总损失为：
+
+$$
+\mathcal{L}=\mathcal{L}_{\mathrm{act}}
++\lambda\mathcal{L}_{\mathrm{vid}}
+$$
+
+当 $`\lambda=1`$ 时，未来视频预测作为辅助监督约束 Video DiT 学习运动和交互相关表征；当 $`\lambda=0`$ 时，只优化动作损失，可用于验证视频共同训练的贡献。
+
+### 1.5 训练与推理流程
+
+| 阶段/模式 | Video DiT | Action DiT | 是否生成未来视频 |
+|---|---|---|---:|
+| 训练 | 学习当前帧与未来视频表征 | 学习动作去噪 | 是 |
+| Action-only 推理 | 当前帧单次前向并写入 KV Cache | 10步动作去噪 | 否 |
+| Joint 分析模式 | 未来视频迭代去噪 | 动作同步去噪 | 是 |
+
+Action-only 是 Fast-WAM 的标准推理路径。“Single Forward Pass”只表示 Video DiT 对当前帧执行一次前向；Action DiT 仍需完成多步动作去噪。Joint 模式保留在本章代码中，用于分析同一个 checkpoint 生成的未来视频及其延迟开销。
+
+### 1.6 论文实验结论
+
+论文使用一致骨干比较四个受控变体，下面保留最能说明结论的平均结果：
+
+| 方法 | 视频共同训练 | 测试时生成未来 | RoboTwin 2.0 | LIBERO | 真机延迟 |
+|---|---:|---:|---:|---:|---:|
+| Fast-WAM | 是 | 否 | **91.8** | 97.6 | **190 ms** |
+| Fast-WAM-Joint | 是 | 是 | 90.6 | **98.5** | — |
+| Fast-WAM-IDM | 是 | 是 | 91.3 | 98.0 | 810 ms |
+| w/o video co-train | 否 | 否 | 83.8 | 93.5 | — |
+
+![真机性能与延迟](assets/fig4_real_world_results.png)
+
+<p align="center"><em>图 4　真机成功率、完成时间与推理延迟对比（图片来源：<a href="https://arxiv.org/abs/2603.16666">Fast-WAM 论文 Figure 4</a>）</em></p>
+
+这些结果支持以下判断：
+
+- 移除视频共同训练后，RoboTwin 和 LIBERO 平均成功率分别下降 8.0 和 4.1 个百分点；
+- Fast-WAM 与 Joint、IDM 的任务性能接近，说明测试时显式生成未来并非当前实验中的主要收益来源；
+- Fast-WAM-IDM 真机延迟约为 Fast-WAM 的 4.26 倍，未来视频扩散会明显降低闭环频率；
+- 结论仍受骨干、数据和任务分布限制；对需要长时前瞻的任务，测试时未来想象是否有额外价值仍需单独验证。
+
+## 第二部分 复现与部署
+
+### 2.1 G2 任务与数据接口
+
+#### 2.1.1 任务定义
 
 任务沿用本教程的 G2 三色物块入盒场景：桌面放置红、绿、蓝三个物块和一个空盒，机器人根据语言指令抓取指定颜色并放入盒中。
 
@@ -22,7 +184,7 @@ Pick up the blue block and place it into the empty box.
 
 三种颜色共享模型和数据集，由语言指令区分目标。仿真场景、自动专家、成功判据和 16 维关节接口位于 `code/task_runtime/`。
 
-### 1.2 观测与动作空间
+#### 2.1.2 观测与动作空间
 
 | 项目 | 取值 | 说明 |
 |---|---|---|
@@ -34,7 +196,7 @@ Pick up the blue block and place it into the empty box.
 | 闭环执行 | 前 24 步 | 执行后重新观测并规划 |
 | 视频块 | 9 帧 | `t+0,t+4,…,t+32` |
 
-### 1.3 三相机如何组成模型输入
+#### 2.1.3 三相机如何组成模型输入
 
 Fast-WAM 沿用官方 RoboTwin 三相机拼接方式：头部图像放在上方，两个腕部图像放在下方。
 
@@ -53,7 +215,7 @@ Fast-WAM 沿用官方 RoboTwin 三相机拼接方式：头部图像放在上方�
 
 单个模型视频帧为 `320×384`（宽×高）。9 帧是9个未来时刻，每个时刻都包含完整的三个视角，并非每个相机分别生成9帧。
 
-### 1.4 原始轨迹与 LeRobot 数据
+#### 2.1.4 原始轨迹与 LeRobot 数据
 
 采集脚本把每条轨迹保存为 NPZ，转换脚本再写入 LeRobot 2.1：
 
@@ -70,15 +232,14 @@ Fast-WAM 沿用官方 RoboTwin 三相机拼接方式：头部图像放在上方�
 
 转换前会检查轨迹长度、图像形状、频率、字段完整性和数值有限性。少于33帧的轨迹不能形成一个完整训练窗口，会被拒绝。
 
-## 第二部分 代码结构与环境配置
+### 2.2 代码与环境配置
 
-### 2.1 正式教程目录
+#### 2.2.1 项目目录
 
 ```text
 前沿算法2-Fast-WAM/
 ├── docs/
-│   ├── Fast-WAM 模型原理.md
-│   ├── Fast-WAM 复现与部署.md
+│   ├── Fast-WAM 世界动作模型复现与部署.md
 │   └── assets/                     # 论文插图与精选执行视频
 └── code/
     ├── README.md
@@ -103,7 +264,7 @@ Fast-WAM 沿用官方 RoboTwin 三相机拼接方式：头部图像放在上方�
 
 官方 Fast-WAM 仓库、数据、预训练权重、训练 checkpoint 和评测输出均为运行时产物，由 `.gitignore` 排除，不随教程保存。
 
-### 2.2 准备仿真资产与模型环境
+#### 2.2.2 准备仿真资产与模型环境
 
 本章已验证的环境为 Linux、NVIDIA GPU 和 Isaac Sim 5.1.0；模型端使用 Python 3.10、PyTorch 2.7.1 和 CUDA 12.8。Joint 模式如需保存预测视频，系统还需要 `ffmpeg`。
 
@@ -142,7 +303,7 @@ conda activate fastwam
 
 `setup_env.sh` 创建或复用名为 `fastwam` 的 Python 3.10 环境，安装 PyTorch 2.7.1、Fast-WAM、LeRobot 2.1 写入器和离线测试依赖。Isaac Sim 仍使用教程现有的仿真环境，不与模型环境混装。
 
-### 2.3 接入 G2 配置与运行目录
+#### 2.2.3 接入 G2 配置与运行目录
 
 官方 Fast-WAM 训练脚本以 `FastWAM/` 为工作目录，只会按官方约定从 `FastWAM/configs`、`FastWAM/data` 和 `FastWAM/checkpoints` 查找配置、数据与初始权重。本教程则把 G2 任务代码和运行产物放在章节目录中，便于单独管理，因此需要在两种目录结构之间建立连接。
 
@@ -164,7 +325,7 @@ python -m pytest tests -q
 
 `link_dirs.sh` 会校验 Fast-WAM commit；版本不一致时会直接停止，避免在未验证的上游接口上训练。
 
-### 2.4 准备模型权重
+#### 2.2.4 准备模型权重
 
 ```bash
 conda activate fastwam
@@ -178,9 +339,9 @@ bash download_weights.sh
 
 Action DiT 插值在 CPU 上执行，避免同时把完整视频骨干载入小显存 GPU。已有 Wan2.2 权重时可以用软链接复用。
 
-## 第三部分 数据采集与转换
+### 2.3 数据采集与处理
 
-### 3.1 采集专家轨迹
+#### 2.3.1 采集专家轨迹
 
 先只查看采集配额：
 
@@ -203,7 +364,7 @@ ${ISAACLAB_ROOT}/_isaac_sim/python.sh collect_data.py \
 
 采集支持断点续跑。失败轨迹会保留用于诊断，但转换时只接收成功且满足数据合同的轨迹。
 
-### 3.2 转换并检查数据
+#### 2.3.2 转换并检查数据
 
 ```bash
 conda activate fastwam
@@ -221,7 +382,7 @@ python inspect_data.py --lerobot data/lerobot/g2_pick_block_lerobot
 
 单个样本的视频形状为 `[3,9,384,320]`，动作与状态分别为 `[32,16]`，文本缓存形状为 `[128,4096]`。
 
-### 3.3 预计算文本表征
+#### 2.3.3 预计算文本表征
 
 ```bash
 conda activate fastwam
@@ -230,9 +391,9 @@ bash precompute_text.sh
 
 训练和部署均复用三条指令的 T5 context。推理服务默认读取预计算 context，避免 T5 与约6B参数的策略同时占用显存。
 
-## 第四部分 模型训练
+### 2.4 模型训练
 
-### 4.1 训练目标选择
+#### 2.4.1 训练目标选择
 
 Fast-WAM 始终学习动作预测，本章提供两种训练目标：
 
@@ -245,11 +406,11 @@ Fast-WAM 始终学习动作预测，本章提供两种训练目标：
 
 两种训练目标不需要分别维护脚本或配置文件，运行时直接通过 `model.loss.lambda_video` 参数切换。
 
-### 4.2 全量微调
+#### 2.4.2 全量微调
 
 本章的正式实验采用8卡全量微调。下面依次说明参数更新范围、训练参数配置和启动方法。
 
-#### 4.2.1 参数更新范围
+**参数更新范围。**
 
 全量微调会更新 MoT 和 G2 状态编码模块中的全部可训练参数：
 
@@ -263,7 +424,7 @@ Fast-WAM 始终学习动作预测，本章提供两种训练目标：
 
 Video Expert 和 Action Expert 的注意力层、FFN 与归一化层都会参与训练，Action Expert 的动作输入输出层也会更新。可训练参数总数为 `6,020,761,808`。
 
-#### 4.2.2 训练配置与启动
+**训练配置与启动。**
 
 配置文件为 `configs/task/g2_uncond_3cam384_1e-4.yaml`，正式训练参数如下：
 
@@ -291,7 +452,7 @@ python scripts/dryrun_fastwam.py task=g2_uncond_3cam384_1e-4
 cd ..
 ```
 
-根据4.1节选择训练目标：
+根据 2.4.1 节选择训练目标：
 
 ```bash
 # 加视频损失
@@ -311,9 +472,9 @@ FastWAM/runs/<run>/
 
 权重和 `dataset_stats.json` 必须来自同一个 run。
 
-### 4.3 LoRA 微调
+#### 2.4.3 LoRA 微调
 
-LoRA 是没有多卡资源时的备选方案。它在双 expert 的注意力和 FFN 线性层中加入 rank-16 适配器，完整训练 G2 新增输入输出层，并用 int8 保存冻结基座以降低显存占用。
+LoRA 是没有多卡资源时的备选方案。它在双 expert 的注意力和 FFN 线性层中加入 rank-16 适配器，完整训练 Action Expert 的动作输入输出层和 G2 状态编码器，并用 int8 保存冻结基座以降低显存占用。
 
 | 配置项 | 数值 |
 |---|---:|
@@ -347,9 +508,9 @@ python merge_lora.py \
 
 合并后的 checkpoint 可以直接交给 `serve_policy.py`，同时仍需使用同一 run 的 `dataset_stats.json`。LoRA 仅作为低显存训练路径，不参与后文实验指标对比。
 
-## 第五部分 推理服务与闭环评测
+### 2.5 模型推理与闭环评测
 
-### 5.1 推理模式选择
+#### 2.5.1 推理模式选择
 
 Fast-WAM 提供两种推理模式：
 
@@ -360,7 +521,7 @@ Fast-WAM 提供两种推理模式：
 
 两种模式使用相同的 checkpoint 和当前三视角观测。Action-only 只计算动作；Joint 在计算动作的同时生成未来视频。后文的 Joint 可视化使用加视频损失训练的模型。
 
-### 5.2 启动推理服务
+#### 2.5.2 启动推理服务
 
 Action-only 模式：
 
@@ -405,7 +566,7 @@ python summarize_latency.py results/latency_joint.log \
 
 计时前后均执行 `torch.cuda.synchronize()`。Action-only 统计 `infer_action()`，Joint 统计包含视频生成的 `infer_joint()`；两者均不包含 RPC 通信、图像预处理、动作反归一化、仿真和动作执行。
 
-### 5.3 闭环评测
+#### 2.5.3 闭环评测
 
 本章采用统一的 RGB 扩大评测协议：
 
@@ -437,11 +598,11 @@ ${ISAACLAB_ROOT}/_isaac_sim/python.sh evaluate.py \
 
 评测端每执行24步就重新获取三视角观测并请求下一个 Action Chunk。测试 Joint 服务时，将端口改为该服务使用的端口。
 
-### 5.4 实验结果
+#### 2.5.4 实验结果
 
-#### 5.4.1 试验指标
+**试验指标。**
 
-以下结果均来自 step7500，并使用5.3节的同一评测协议。
+以下结果均来自 step7500，并使用 2.5.3 节的同一评测协议。
 
 **推理模式对比：固定加视频损失**
 
@@ -450,7 +611,7 @@ ${ISAACLAB_ROOT}/_isaac_sim/python.sh evaluate.py \
 | Action-only | 50/50 | 48/50 | 44/50 | 142/150（94.7%） | 326.8 |
 | Joint | 50/50 | 46/50 | 46/50 | 142/150（94.7%） | 687.1 |
 
-Action-only 与 Joint 的总成功率相同，Joint 的单次延迟约为 Action-only 的2.10倍。延迟按 5.2 节的方法在单张 NVIDIA H100 80GB 上测量，模型使用 BF16、10次去噪和 eager 模式。
+Action-only 与 Joint 的总成功率相同，Joint 的单次延迟约为 Action-only 的2.10倍。延迟按 2.5.2 节的方法在单张 NVIDIA H100 80GB 上测量，模型使用 BF16、10次去噪和 eager 模式。
 
 **训练目标对比：固定 Action-only 推理**
 
@@ -459,9 +620,9 @@ Action-only 与 Joint 的总成功率相同，Joint 的单次延迟约为 Action
 | 加视频损失 | 50/50 | 48/50 | 44/50 | 142/150（94.7%） |
 | 不加视频损失 | 49/50 | 46/50 | 42/50 | 137/150（91.3%） |
 
-加视频损失的结果高3.3个百分点，但配对检验为 `p=0.267`，当前样本尚不能确认该差异具有统计显著性。
+在本次 150 集评测中，加视频损失的模型总成功率高 3.3 个百分点。该结果用于比较本章两种训练目标，不作为统计显著性结论。
 
-#### 5.4.2 可视化
+**可视化。**
 
 下面是 step7500 Action-only 模式的一次成功执行。模型只输出动作，画面按照头部相机在上、两个腕部相机在下的方式排列。动画保持原始速度，完整时长为 31.3 秒。
 
@@ -470,3 +631,11 @@ Action-only 与 Joint 的总成功率相同，Joint 的单次延迟约为 Action
 下面是 step7500 Joint 模式的一次成功执行。左侧为真实三视角，右侧为同一次推理生成的未来三视角。动画保持原始速度，完整时长为 31.3 秒。
 
 ![Fast-WAM Joint 真实执行与预测视频](assets/fastwam_joint_success_actual_vs_predicted.gif)
+
+## 参考文献与延伸阅读
+
+- Fast-WAM：[论文](https://arxiv.org/abs/2603.16666)｜[项目主页](https://yuantianyuan01.github.io/FastWAM/)｜[官方代码](https://github.com/yuantianyuan01/FastWAM)｜[模型权重](https://huggingface.co/yuanty/fastwam)
+- Wan2.2 视频骨干：[官方代码](https://github.com/Wan-Video/Wan2.2)
+- Motus：[论文](https://arxiv.org/abs/2512.13030)
+- LIBERO：[论文](https://arxiv.org/abs/2306.03310)｜[代码](https://github.com/Lifelong-Robot-Learning/LIBERO)
+- RoboTwin 2.0：[代码](https://github.com/RoboTwin-Platform/RoboTwin)
