@@ -25,3 +25,25 @@
          self.optimizer = torch.optim.AdamW(
              trainable_params,
              lr=self.learning_rate,
+@@ -311,11 +323,18 @@
+         model.eval()
+         model.requires_grad_(False)
+         model.dit.train()
+-        model.dit.requires_grad_(True)
++        lora_enabled = bool(getattr(model, "_fastwam_lora_enabled", False))
++        if lora_enabled:
++            from .lora import restore_lora_trainability
++
++            restore_lora_trainability(model)
++        else:
++            model.dit.requires_grad_(True)
+         proprio_encoder = getattr(model, "proprio_encoder", None)
+         if proprio_encoder is not None:
+             proprio_encoder.train()
+-            proprio_encoder.requires_grad_(True)
++            if not lora_enabled:
++                proprio_encoder.requires_grad_(True)
+-
++
+     @staticmethod
+     def _to_batched_eval_sample(sample):

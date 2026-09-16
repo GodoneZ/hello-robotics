@@ -34,6 +34,6 @@ bash setup_env.sh
 
 G2 USD 不随代码仓库分发。在 `hello-robotics` 根目录按教程下载后，默认路径为 `code/assets/robot/G2_omnipicker/robot.usda`。
 
-完整环境配置、训练命令、评测协议与本章实测结果见 [`../docs/Fast-WAM 复现与部署.md`](../docs/Fast-WAM%20复现与部署.md)。
+完整环境配置、训练命令、评测协议与本章实测结果见 [`../docs/Fast-WAM 世界动作模型复现与部署.md`](../docs/Fast-WAM%20世界动作模型复现与部署.md)。
 
 如资产位于其他目录，运行前通过 `G2_ASSETS_ROOT` 指定资产根目录。
