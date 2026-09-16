@@ -1,0 +1,27 @@
+--- a/src/fastwam/trainer.py
++++ b/src/fastwam/trainer.py
+@@ -82,10 +82,22 @@
+         # Freeze non-trainable modules before optimizer/deepspeed initialization.
+         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
+         self._apply_dit_only_train_mode(self.model)
+-        trainable_params = list(self.model.dit.parameters())
++        # Optional single-GPU LoRA path supplied by the G2 tutorial.
++        lora_rank = int(os.environ.get("FASTWAM_LORA_RANK", "0"))
++        if lora_rank > 0:
++            from .lora import apply_lora
++
++            apply_lora(
++                self.model,
++                rank=lora_rank,
++                alpha=float(os.environ.get("FASTWAM_LORA_ALPHA", str(2 * lora_rank))),
++                dropout=float(os.environ.get("FASTWAM_LORA_DROPOUT", "0")),
++                quantize_base=os.environ.get("FASTWAM_LORA_QUANTIZE_BASE", "0") == "1",
++            )
++        trainable_params = [p for p in self.model.dit.parameters() if p.requires_grad]
+         proprio_encoder = getattr(self.model, "proprio_encoder", None)
+         if proprio_encoder is not None:
+-            trainable_params.extend(list(proprio_encoder.parameters()))
++            trainable_params.extend(p for p in proprio_encoder.parameters() if p.requires_grad)
+         self.optimizer = torch.optim.AdamW(
+             trainable_params,
+             lr=self.learning_rate,

@@ -1,0 +1,15 @@
+# @package _global_
+
+# Single-GPU LoRA preset for a 24 GB GPU. The trainer patch freezes and
+# int8-quantizes the base MoT; this config controls the data and schedule.
+defaults:
+  - g2_uncond_3cam384_1e-4
+  - _self_
+
+batch_size: 1
+num_workers: 2
+gradient_accumulation_steps: 1
+num_epochs: 5
+max_steps: 50000
+save_every: 5000
+eval_every: 1000
