@@ -454,14 +454,10 @@ Action-only 与 Joint 的总成功率相同，Joint 的单次延迟约为 Action
 
 #### 5.4.2 可视化
 
-下面是 step7500 Action-only 模式的一次成功执行。模型只输出动作，画面按照头部相机在上、两个腕部相机在下的方式排列。
+下面是 step7500 Action-only 模式的一次成功执行。模型只输出动作，画面按照头部相机在上、两个腕部相机在下的方式排列。动画保持原始速度，完整时长为 31.3 秒。
 
-![Fast-WAM Action-only一次成功](assets/fastwam_action_only_success_blue_poster.jpg)
+![Fast-WAM Action-only 一次成功执行](assets/fastwam_action_only_success_blue.gif)
 
-[下载 Action-only 完整执行视频（31.3秒，30 FPS，1280×720）](assets/fastwam_action_only_success_blue.mp4)
+下面是 step7500 Joint 模式的一次成功执行。左侧为真实三视角，右侧为同一次推理生成的未来三视角。动画保持原始速度，完整时长为 31.3 秒。
 
-下面是 step7500 Joint 模式的一次成功执行。左侧为真实三视角，右侧为同一次推理生成的未来三视角。
-
-![Fast-WAM Joint推理可视化](assets/fastwam_joint_success_actual_vs_predicted_poster.jpg)
-
-[下载 Joint 真实执行与预测视频（31.3秒，30 FPS，1280×720）](assets/fastwam_joint_success_actual_vs_predicted.mp4)
+![Fast-WAM Joint 真实执行与预测视频](assets/fastwam_joint_success_actual_vs_predicted.gif)
