@@ -1,0 +1,2 @@
+# 推理库版本；PyTorch/ROS 等运行环境另行配置，见 README。
+ultralytics==8.3.203
